@@ -9,7 +9,7 @@ from fpdf import FPDF
 # --- НАСТРОЙКИ ПОДКЛЮЧЕНИЯ К БД ---
 load_dotenv()
 DB_USER = "postgres"
-DB_PASSWORD = os.getenv("DB_PASS")
+DB_PASSWORD = os.getenv("DB_PASS", "твой_пароль_если_нет")
 DB_HOST = "127.0.0.1"
 DB_PORT = "5432"
 DB_NAME = "drilling_fluids"
@@ -88,11 +88,19 @@ def save_interval_to_db(interval_data):
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, (SELECT id FROM presets WHERE name = %s LIMIT 1), %s)
     """
     params = (
-        st.session_state['user_id'], st.session_state['well_name'], interval_data['Имя_интервала'],
-        interval_data['H'], interval_data['P_pl'], interval_data['T_zab'], interval_data['Angle'],
-        interval_data['Fluid_type'], interval_data['Rho_min'], interval_data['Rho_max'],
-        interval_data['Viscosity'], interval_data['Preset'],
-        int(interval_data['Fluid_id'])  # ИСПРАВЛЕНИЕ 2: Принудительный перевод в Python int
+        int(st.session_state['user_id']),
+        str(st.session_state['well_name']),
+        str(interval_data['Имя_интервала']),
+        float(interval_data['H']),
+        float(interval_data['P_pl']),
+        float(interval_data['T_zab']),
+        float(interval_data['Angle']),
+        str(interval_data['Fluid_type']),
+        float(interval_data['Rho_min']),
+        float(interval_data['Rho_max']),
+        float(interval_data['Viscosity']),
+        str(interval_data['Preset']),
+        int(interval_data['Fluid_id'])
     )
     execute_query(query, params)
 
@@ -101,7 +109,7 @@ def get_history():
     conn = get_db_connection()
     query = """
     SELECT ch.calc_date AS "Дата", u.username AS "Инженер", ch.well_name AS "Скважина", 
-           ch.interval_name AS "Интервал", ch.depth AS "Глубина", p.name AS "Условия", f.name AS "Раствор"
+           ch.interval_name AS "Интервал", ch.depth AS "Глубина", p.name AS "Условия", f.name AS "Победитель (Раствор)"
     FROM calculation_history ch
     JOIN presets p ON ch.preset_id = p.id
     JOIN fluids f ON ch.selected_fluid_id = f.id
@@ -151,6 +159,7 @@ def calculate_topsis(df, weights):
     col_sums[col_sums == 0] = 1e-10
     norm_matrix = matrix / col_sums
     weighted_matrix = norm_matrix * weights
+
     ideal_best = [weighted_matrix[:, 0].max(), weighted_matrix[:, 1].min(), weighted_matrix[:, 2].max(),
                   weighted_matrix[:, 3].min()]
     ideal_worst = [weighted_matrix[:, 0].min(), weighted_matrix[:, 1].max(), weighted_matrix[:, 2].min(),
@@ -159,16 +168,20 @@ def calculate_topsis(df, weights):
     dist_best = np.sqrt(((weighted_matrix - ideal_best) ** 2).sum(axis=1))
     dist_worst = np.sqrt(((weighted_matrix - ideal_worst) ** 2).sum(axis=1))
 
-    rating = dist_worst / (dist_best + dist_worst)
-    # ИСПРАВЛЕНИЕ 4: Убираем вероятность появления NaN
-    return np.nan_to_num(rating, nan=0.0)
+    denominator = dist_best + dist_worst
+    rating = np.zeros_like(dist_worst)
+    mask = denominator != 0
+    rating[mask] = dist_worst[mask] / denominator[mask]
+    rating[~mask] = 1.0
+
+    return rating
 
 
 # ==========================================
 # ЭКСПОРТ В PDF
 # ==========================================
 def create_summary_pdf(well_name, intervals):
-    pdf = FPDF(orientation='L')
+    pdf = FPDF(orientation='P')
     pdf.add_page()
     font_path = "Roboto-Regular.ttf"
 
@@ -183,25 +196,29 @@ def create_summary_pdf(well_name, intervals):
     pdf.cell(0, 10, txt=f"Объект: {well_name}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
-    pdf.set_font(pdf.font_family, size=9)
-    # ИСПРАВЛЕНИЕ 3: Перераспределили ширину. Раствору отдано 130мм (почти половина листа)
-    col_widths = [25, 15, 15, 15, 30, 150, 25]
-    headers = ["Интервал", "Глубина", "Pпл", "Tзаб", "Плотность", "Рекомендуемый раствор", "Рейтинг МАИ"]
-
-    for i, header in enumerate(headers):
-        pdf.cell(col_widths[i], 10, txt=header, border=1, align='C')
-    pdf.ln()
-
     for it in intervals:
-        pdf.cell(col_widths[0], 10, txt=str(it['Имя_интервала']), border=1, align='C')
-        pdf.cell(col_widths[1], 10, txt=str(it['H']), border=1, align='C')
-        pdf.cell(col_widths[2], 10, txt=str(it['P_pl']), border=1, align='C')
-        pdf.cell(col_widths[3], 10, txt=str(it['T_zab']), border=1, align='C')
-        pdf.cell(col_widths[4], 10, txt=f"{it['Rho_min']} - {it['Rho_max']}", border=1, align='C')
-        # Для очень длинных названий можно использовать обрезку строки, если они все еще не влезают
-        pdf.cell(col_widths[5], 10, txt=str(it['Раствор'])[:85], border=1, align='L')
-        pdf.cell(col_widths[6], 10, txt=str(it['Рейтинг']), border=1, align='C')
-        pdf.ln()
+        pdf.set_fill_color(230, 230, 230)
+        pdf.set_font(pdf.font_family, size=12)
+        pdf.cell(0, 10, txt=f" Интервал: {it['Имя_интервала']}", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_font(pdf.font_family, size=10)
+        pdf.cell(0, 8, txt=f"  Условия: Глубина {it['H']} м | Давление {it['P_pl']} МПа | Температура {it['T_zab']} °C",
+                 new_x="LMARGIN", new_y="NEXT", border='LR')
+        pdf.cell(0, 8, txt=f"  Требуемое окно бурения: Плотность от {it['Rho_min']} до {it['Rho_max']} г/см3",
+                 new_x="LMARGIN", new_y="NEXT", border='LR')
+        pdf.cell(0, 8, txt=f"  Осложнение (МАИ): {it['Preset']}", new_x="LMARGIN", new_y="NEXT", border='LRB')
+
+        pdf.ln(2)
+        pdf.set_font(pdf.font_family, size=11)
+        pdf.cell(0, 8, txt="  Рекомендуемые растворы:", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_font(pdf.font_family, size=10)
+        for idx, fluid in enumerate(it['Top_3']):
+            text = f"    {idx + 1}. {fluid['Название']} ({fluid['Основа']})"
+            pdf.cell(140, 8, txt=text)
+            pdf.cell(0, 8, txt=f"Рейтинг: {fluid['Рейтинг']}", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.ln(5)
 
     return pdf.output(dest='S')
 
@@ -246,12 +263,12 @@ def show_engineer_panel():
             st.rerun()
 
     st.markdown("---")
-    col_input, col_results = st.columns([1, 2])
+    col_input, col_results = st.columns([1, 1.5])
 
     with col_input:
         st.subheader("➕ Добавить интервал")
         with st.form("add_interval_form", clear_on_submit=False):
-            int_name = st.text_input("Название", value="Интервал 1")
+            int_name = st.text_input("Название (напр. Кондуктор)", value="Интервал 1")
             H = st.number_input("Глубина подошвы (H), м", min_value=10.0, value=1000.0, step=50.0)
             P_pl = st.number_input("Пластовое давление (Pпл), МПа", min_value=1.0, value=12.0, step=0.5)
             T_zab = st.number_input("Макс. температура (Tзаб), °C", min_value=10.0, value=40.0, step=5.0)
@@ -263,9 +280,8 @@ def show_engineer_panel():
             presets_df = get_presets()
             selected_preset_name = st.selectbox("Осложнения (МАИ)",
                                                 presets_df['name'].tolist() if not presets_df.empty else [])
-            submit_btn = st.form_submit_button("Рассчитать", type="primary", use_container_width=True)
+            submit_btn = st.form_submit_button("Рассчитать и добавить", type="primary", use_container_width=True)
 
-        # Выполняем расчет ВНЕ формы, чтобы можно было интерактивно вывести Топ-3
         if submit_btn and not presets_df.empty:
             rho_min, rho_max, req_viscosity, req_dns = calculate_physics(H, P_pl, T_zab, angle, fluid_type)
 
@@ -284,14 +300,13 @@ def show_engineer_panel():
                     df["Рейтинг"] = calculate_topsis(df, weights)
                     df = df.sort_values("Рейтинг", ascending=False).reset_index(drop=True)
 
-                    # ИСПРАВЛЕНИЕ 5: Показываем инженеру ТОП-3 вариантов
-                    st.success(f"Расчет успешен! Требуемая плотность: {rho_min} - {rho_max} г/см3")
-                    st.write("🏆 **Топ-3 подходящих раствора:**")
-
-                    # Форматируем рейтинг для вывода
-                    df_display_top = df.head(3).copy()
-                    df_display_top["Рейтинг"] = (df_display_top["Рейтинг"] * 100).round(1).astype(str) + "%"
-                    st.dataframe(df_display_top[["Название", "Основа", "Рейтинг"]], use_container_width=True)
+                    top_3_fluids = []
+                    for idx, row in df.head(3).iterrows():
+                        top_3_fluids.append({
+                            "Название": row['Название'],
+                            "Основа": row['Основа'],
+                            "Рейтинг": f"{(row['Рейтинг'] * 100):.1f}%"
+                        })
 
                     winner = df.iloc[0]
                     interval_data = {
@@ -299,46 +314,48 @@ def show_engineer_panel():
                         "Angle": angle, "Fluid_type": fluid_type, "Preset": selected_preset_name,
                         "Rho_min": rho_min, "Rho_max": rho_max, "Viscosity": req_viscosity,
                         "Fluid_id": int(winner['id']), "Раствор": winner['Название'],
-                        "Рейтинг": f"{(winner['Рейтинг'] * 100):.1f}%", "Цена": winner['Стоимость']
+                        "Рейтинг": f"{(winner['Рейтинг'] * 100):.1f}%",
+                        "Top_3": top_3_fluids
                     }
                     st.session_state['project_intervals'].append(interval_data)
-                    st.rerun()  # Обновляем страницу, чтобы таблица справа перерисовалась
+                    st.rerun()
 
     with col_results:
-        st.subheader("📑 Сводная таблица по скважине")
+        st.subheader("📑 Сводка по интервалам")
 
         if len(st.session_state['project_intervals']) > 0:
-            df_display = pd.DataFrame(st.session_state['project_intervals'])
-            # Использование конфигурации колонок Streamlit, чтобы длинные названия не обрезались
-            st.dataframe(df_display[["Имя_интервала", "H", "Rho_min", "Rho_max", "Раствор", "Рейтинг"]],
-                         use_container_width=True)
 
-            # ИСПРАВЛЕНИЕ 1: Блок удаления конкретного интервала
-            st.markdown("---")
-            col_del1, col_del2 = st.columns([2, 1])
-            with col_del1:
-                interval_options = {i: f"{it['Имя_интервала']} ({it['H']}м)" for i, it in
-                                    enumerate(st.session_state['project_intervals'])}
-                interval_to_delete = st.selectbox("Выберите интервал для удаления:",
-                                                  options=list(interval_options.keys()),
-                                                  format_func=lambda x: interval_options[x])
-            with col_del2:
-                st.write("")
-                st.write("")
-                if st.button("❌ Удалить выбранный", use_container_width=True):
-                    st.session_state['project_intervals'].pop(interval_to_delete)
-                    st.rerun()
-            st.markdown("---")
+            # Вывод интервалов в виде карточек
+            for i, it in enumerate(st.session_state['project_intervals']):
+                with st.container():
+                    c_info, c_del = st.columns([12, 1])
+                    with c_info:
+                        st.markdown(f"**{it['Имя_интервала']} (до {it['H']} м)**")
+                        st.caption(
+                            f"Плотность: {it['Rho_min']} - {it['Rho_max']} г/см³ | Вязкость: {it['Viscosity']} мПа·с")
 
+                        # Вывод трех растворов в столбец (без лишних слов и иконок)
+                        for idx, fluid in enumerate(it['Top_3']):
+                            st.write(f"{idx + 1}. {fluid['Название']} — {fluid['Рейтинг']}")
+
+                    with c_del:
+                        # Крестик для удаления интервала
+                        if st.button("❌", key=f"del_btn_{i}", help="Удалить этот интервал"):
+                            st.session_state['project_intervals'].pop(i)
+                            st.rerun()
+                st.divider()  # Горизонтальная линия между карточками
+
+            # Кнопки финального сохранения
             c_btn1, c_btn2 = st.columns(2)
             with c_btn1:
-                if st.button("🗑️ Очистить всю скважину", use_container_width=True):
+                if st.button("🗑️ Очистить скважину", use_container_width=True):
                     st.session_state['project_intervals'] = []
                     st.rerun()
 
             with c_btn2:
                 pdf_bytes = create_summary_pdf(st.session_state['well_name'], st.session_state['project_intervals'])
-                if st.download_button(label="💾 Сохранить в БД и Скачать PDF",
+                # Кнопка переименована
+                if st.download_button(label="💾 Сохранить отчет",
                                       data=bytes(pdf_bytes),
                                       file_name=f"Паспорт_{st.session_state['well_name']}.pdf",
                                       mime="application/pdf", type="primary", use_container_width=True):
@@ -360,6 +377,7 @@ def show_admin_panel():
         st.rerun()
 
     tab_history, tab_add = st.tabs(["🕰️ История", "➕ Добавление растворов"])
+
     with tab_history:
         if st.button("🔄 Обновить историю"): pass
         history_df = get_history()
@@ -367,8 +385,29 @@ def show_admin_panel():
             st.dataframe(history_df, use_container_width=True)
         else:
             st.info("История пуста.")
+
     with tab_add:
-        st.warning("Раздел добавления растворов временно скрыт. Сосредоточьтесь на функционале инженера.")
+        with st.form("add_fluid_form", clear_on_submit=True):
+            st.subheader("Внесение нового раствора в базу")
+            f_name = st.text_input("Название раствора")
+            f_base = st.selectbox("Основа", ["Водная", "Углеводородная", "Синтетическая"])
+
+            c_f1, c_f2, c_f3 = st.columns(3)
+            d_min = c_f1.number_input("Плотность от (г/см3)", value=1.00, step=0.01)
+            d_max = c_f2.number_input("Плотность до (г/см3)", value=1.20, step=0.01)
+            t_max = c_f3.number_input("Макс. Температура (°C)", value=100, step=10)
+
+            c_f4, c_f5, c_f6, c_f7 = st.columns(4)
+            inh = c_f4.number_input("Ингибирование (1-100)", value=50)
+            fric = c_f5.number_input("Коэфф. трения", value=0.20, step=0.01)
+            eco = c_f6.number_input("Экологичность (1-10)", value=5)
+            cost = c_f7.number_input("Стоимость (руб/м3)", value=5000)
+
+            if st.form_submit_button("Сохранить раствор в БД"):
+                query = """INSERT INTO fluids (name, base_type, density_min, density_max, temp_max, filtration, inhibition, friction, eco_score, cost) 
+                           VALUES (%s, %s, %s, %s, %s, 10.0, %s, %s, %s, %s)"""
+                if execute_query(query, (f_name, f_base, d_min, d_max, t_max, inh, fric, eco, cost)):
+                    st.success("✅ Раствор успешно добавлен!")
 
 
 def main():
