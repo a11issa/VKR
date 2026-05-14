@@ -80,6 +80,20 @@ def get_fluids_filtered(rho_min, rho_max, temp_max):
     return df
 
 
+def get_fluid_reagents(fluid_id):
+    """Выгружает базовые реагенты для конкретного раствора"""
+    conn = get_db_connection()
+    query = """
+    SELECT r.name, fr.concentration, r.function_type
+    FROM fluid_reagents fr
+    JOIN reagents r ON fr.reagent_id = r.id
+    WHERE fr.fluid_id = %s
+    """
+    df = pd.read_sql(query, conn, params=(int(fluid_id),))
+    conn.close()
+    return df
+
+
 def save_interval_to_db(interval_data):
     query = """
     INSERT INTO calculation_history 
@@ -88,19 +102,11 @@ def save_interval_to_db(interval_data):
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, (SELECT id FROM presets WHERE name = %s LIMIT 1), %s)
     """
     params = (
-        int(st.session_state['user_id']),
-        str(st.session_state['well_name']),
-        str(interval_data['Имя_интервала']),
-        float(interval_data['H']),
-        float(interval_data['P_pl']),
-        float(interval_data['T_zab']),
+        int(st.session_state['user_id']), str(st.session_state['well_name']), str(interval_data['Имя_интервала']),
+        float(interval_data['H']), float(interval_data['P_pl']), float(interval_data['T_zab']),
         float(interval_data['Angle']),
-        str(interval_data['Fluid_type']),
-        float(interval_data['Rho_min']),
-        float(interval_data['Rho_max']),
-        float(interval_data['Viscosity']),
-        str(interval_data['Preset']),
-        int(interval_data['Fluid_id'])
+        str(interval_data['Fluid_type']), float(interval_data['Rho_min']), float(interval_data['Rho_max']),
+        float(interval_data['Viscosity']), str(interval_data['Preset']), int(interval_data['Fluid_id'])
     )
     execute_query(query, params)
 
@@ -122,7 +128,7 @@ def get_history():
 
 
 # ==========================================
-# МАТЕМАТИКА И ФИЗИКА
+# МАТЕМАТИКА И ФИЗИКА (ВКЛЮЧАЯ ХИМИЮ)
 # ==========================================
 def calculate_physics(H, P_pl, T_zab, angle, fluid_type):
     delta_P = 0
@@ -177,6 +183,55 @@ def calculate_topsis(df, weights):
     return rating
 
 
+def calculate_recipe(D_mm, H, rho_req, fluid_id, rho_base):
+    """Считает объем скважины и массы реагентов с учетом мат. баланса"""
+    # Объем скважины, м3 (с коэффициентом кавернозности 1.2)
+    D_m = D_mm / 1000.0
+    V = (np.pi * (D_m ** 2) / 4) * H * 1.2
+
+    recipe_list = []
+
+    # 1. Расчет утяжелителя (Барита) по уравнению баланса масс
+    barite_density = 4.2  # Плотность барита, г/см3
+    total_barite_kg = 0
+    volume_base_m3 = V
+
+    if rho_req > rho_base:
+        # Концентрация барита кг/м3
+        barite_kg_m3 = (barite_density * (rho_req - rho_base) / (barite_density - rho_req)) * 1000
+        total_barite_kg = barite_kg_m3 * V
+        # Объем, который займет барит
+        volume_barite_m3 = total_barite_kg / (barite_density * 1000)
+        # Оставшийся объем для базовой жидкости
+        volume_base_m3 = V - volume_barite_m3
+
+        recipe_list.append({
+            "Реагент": "Барит (Утяжелитель)",
+            "Кол-во": f"{total_barite_kg:.0f} кг",
+            "Примечание": f"Доведение плотности до {rho_req:.2f} г/см3"
+        })
+
+    # 2. Добавляем базовую жидкость (Воду/Нефть)
+    recipe_list.append({
+        "Реагент": "Базовая жидкость (Вода/РУО)",
+        "Кол-во": f"{volume_base_m3:.1f} м³",
+        "Примечание": "Дисперсионная среда"
+    })
+
+    # 3. Выгружаем химию из БД для выбранного раствора и считаем на ОБЪЕМ ОСНОВЫ
+    df_reagents = get_fluid_reagents(fluid_id)
+    if not df_reagents.empty:
+        for _, row in df_reagents.iterrows():
+            mass_kg = row['concentration'] * volume_base_m3
+            recipe_list.append({
+                "Реагент": row['name'],
+                "Кол-во": f"{mass_kg:.0f} кг",
+                "Примечание": row['function_type']
+            })
+
+    return round(V, 1), recipe_list
+
+
 # ==========================================
 # ЭКСПОРТ В PDF
 # ==========================================
@@ -199,24 +254,29 @@ def create_summary_pdf(well_name, intervals):
     for it in intervals:
         pdf.set_fill_color(230, 230, 230)
         pdf.set_font(pdf.font_family, size=12)
-        pdf.cell(0, 10, txt=f" Интервал: {it['Имя_интервала']}", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 10, txt=f" Интервал: {it['Имя_интервала']} (до {it['H']} м)", border=1, fill=True, new_x="LMARGIN",
+                 new_y="NEXT")
 
         pdf.set_font(pdf.font_family, size=10)
-        pdf.cell(0, 8, txt=f"  Условия: Глубина {it['H']} м | Давление {it['P_pl']} МПа | Температура {it['T_zab']} °C",
+        pdf.cell(0, 8, txt=f"  Условия: Pпл = {it['P_pl']} МПа | Tзаб = {it['T_zab']} °C | Долото = {it['D_mm']} мм",
                  new_x="LMARGIN", new_y="NEXT", border='LR')
-        pdf.cell(0, 8, txt=f"  Требуемое окно бурения: Плотность от {it['Rho_min']} до {it['Rho_max']} г/см3",
-                 new_x="LMARGIN", new_y="NEXT", border='LR')
-        pdf.cell(0, 8, txt=f"  Осложнение (МАИ): {it['Preset']}", new_x="LMARGIN", new_y="NEXT", border='LRB')
+        pdf.cell(0, 8, txt=f"  Окно бурения: Плотность от {it['Rho_min']} до {it['Rho_max']} г/см3", new_x="LMARGIN",
+                 new_y="NEXT", border='LR')
+        pdf.cell(0, 8, txt=f"  Победитель МАИ: {it['Раствор']} (Рейтинг: {it['Рейтинг']})", new_x="LMARGIN",
+                 new_y="NEXT", border='LRB')
 
+        # Вывод рецептуры
         pdf.ln(2)
-        pdf.set_font(pdf.font_family, size=11)
-        pdf.cell(0, 8, txt="  Рекомендуемые растворы:", new_x="LMARGIN", new_y="NEXT")
-
         pdf.set_font(pdf.font_family, size=10)
-        for idx, fluid in enumerate(it['Top_3']):
-            text = f"    {idx + 1}. {fluid['Название']} ({fluid['Основа']})"
-            pdf.cell(140, 8, txt=text)
-            pdf.cell(0, 8, txt=f"Рейтинг: {fluid['Рейтинг']}", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 8, txt=f"  Расчетная рецептура (Объем скважины: {it['Volume']} м³):", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_font(pdf.font_family, size=9)
+        for r in it['Recipe']:
+            pdf.cell(10, 6, txt="")  # Отступ
+            pdf.cell(70, 6, txt=r['Реагент'], border=1)
+            pdf.cell(30, 6, txt=r['Кол-во'], border=1, align='C')
+            pdf.cell(70, 6, txt=r['Примечание'], border=1)
+            pdf.ln()
 
         pdf.ln(5)
 
@@ -269,7 +329,11 @@ def show_engineer_panel():
         st.subheader("➕ Добавить интервал")
         with st.form("add_interval_form", clear_on_submit=False):
             int_name = st.text_input("Название (напр. Кондуктор)", value="Интервал 1")
-            H = st.number_input("Глубина подошвы (H), м", min_value=10.0, value=1000.0, step=50.0)
+
+            c_h1, c_h2 = st.columns(2)
+            H = c_h1.number_input("Глубина (H), м", min_value=10.0, value=1000.0, step=50.0)
+            D_mm = c_h2.number_input("Долото (D), мм", min_value=50.0, value=215.9, step=1.0)  # Новое поле: Диаметр
+
             P_pl = st.number_input("Пластовое давление (Pпл), МПа", min_value=1.0, value=12.0, step=0.5)
             T_zab = st.number_input("Макс. температура (Tзаб), °C", min_value=10.0, value=40.0, step=5.0)
 
@@ -303,19 +367,23 @@ def show_engineer_panel():
                     top_3_fluids = []
                     for idx, row in df.head(3).iterrows():
                         top_3_fluids.append({
-                            "Название": row['Название'],
-                            "Основа": row['Основа'],
+                            "Название": row['Название'], "Основа": row['Основа'],
                             "Рейтинг": f"{(row['Рейтинг'] * 100):.1f}%"
                         })
 
                     winner = df.iloc[0]
+
+                    # === РАСЧЕТ РЕЦЕПТУРЫ ===
+                    V, recipe = calculate_recipe(D_mm, H, rho_min, winner['id'], winner['density_min'])
+
                     interval_data = {
-                        "Имя_интервала": int_name, "H": H, "P_pl": P_pl, "T_zab": T_zab,
+                        "Имя_интервала": int_name, "H": H, "D_mm": D_mm, "P_pl": P_pl, "T_zab": T_zab,
                         "Angle": angle, "Fluid_type": fluid_type, "Preset": selected_preset_name,
                         "Rho_min": rho_min, "Rho_max": rho_max, "Viscosity": req_viscosity,
                         "Fluid_id": int(winner['id']), "Раствор": winner['Название'],
                         "Рейтинг": f"{(winner['Рейтинг'] * 100):.1f}%",
-                        "Top_3": top_3_fluids
+                        "Top_3": top_3_fluids,
+                        "Volume": V, "Recipe": recipe  # Сохраняем объем и рецепт
                     }
                     st.session_state['project_intervals'].append(interval_data)
                     st.rerun()
@@ -324,28 +392,28 @@ def show_engineer_panel():
         st.subheader("📑 Сводка по интервалам")
 
         if len(st.session_state['project_intervals']) > 0:
-
-            # Вывод интервалов в виде карточек
             for i, it in enumerate(st.session_state['project_intervals']):
                 with st.container():
                     c_info, c_del = st.columns([12, 1])
                     with c_info:
                         st.markdown(f"**{it['Имя_интервала']} (до {it['H']} м)**")
                         st.caption(
-                            f"Плотность: {it['Rho_min']} - {it['Rho_max']} г/см³ | Вязкость: {it['Viscosity']} мПа·с")
+                            f"Плотность: {it['Rho_min']}-{it['Rho_max']} г/см³ | Объем скважины: {it['Volume']} м³")
 
-                        # Вывод трех растворов в столбец (без лишних слов и иконок)
                         for idx, fluid in enumerate(it['Top_3']):
                             st.write(f"{idx + 1}. {fluid['Название']} — {fluid['Рейтинг']}")
 
+                        # Скрываемый блок с химией
+                        with st.expander("🧪 Показать рецептуру победителя", expanded=False):
+                            recipe_df = pd.DataFrame(it['Recipe'])
+                            st.dataframe(recipe_df, use_container_width=True, hide_index=True)
+
                     with c_del:
-                        # Крестик для удаления интервала
                         if st.button("❌", key=f"del_btn_{i}", help="Удалить этот интервал"):
                             st.session_state['project_intervals'].pop(i)
                             st.rerun()
-                st.divider()  # Горизонтальная линия между карточками
+                st.divider()
 
-            # Кнопки финального сохранения
             c_btn1, c_btn2 = st.columns(2)
             with c_btn1:
                 if st.button("🗑️ Очистить скважину", use_container_width=True):
@@ -354,7 +422,6 @@ def show_engineer_panel():
 
             with c_btn2:
                 pdf_bytes = create_summary_pdf(st.session_state['well_name'], st.session_state['project_intervals'])
-                # Кнопка переименована
                 if st.download_button(label="💾 Сохранить отчет",
                                       data=bytes(pdf_bytes),
                                       file_name=f"Паспорт_{st.session_state['well_name']}.pdf",
