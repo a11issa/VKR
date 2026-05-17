@@ -49,10 +49,10 @@ def get_all_users():
     return df
 
 def add_user_to_db(username, password, role):
-    hashed_pw = hash_password(password)
+    hashed = hash_password(password)
     try:
         return execute_query("INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s)",
-                             (username, hashed_pw, role))
+                             (username, hashed, role))
     except Exception:
         return False
 
@@ -71,14 +71,14 @@ def add_reagent_to_db(name, func_type, litho, max_t):
     return execute_query(query, (name, func_type, litho, max_t))
 
 def add_recipe_item(fluid_id, reagent_id, conc):
-    query = "INSERT INTO fluid_reagents (fluid_id, reagent_id, concentration) VALUES (%s, %s, %s)"
+    query = "INSERT INTO fluid_recipes (fluid_id, reagent_id, concentration) VALUES (%s, %s, %s)"
     return execute_query(query, (int(fluid_id), int(reagent_id), float(conc)))
 
 def get_fluid_recipe(fluid_id):
     conn = get_db_connection()
     query = """
     SELECT r.name AS "Реагент", fr.concentration AS "Кг на 1 м³", r.function_type AS "Назначение", r.target_lithology AS "Условие"
-    FROM fluid_reagents fr
+    FROM fluid_recipes fr
     JOIN reagents r ON fr.reagent_id = r.id
     WHERE fr.fluid_id = %s
     """
