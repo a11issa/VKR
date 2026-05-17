@@ -1,67 +1,11 @@
 import os
-import plotly.graph_objects as go
-import plotly.express as px
 import matplotlib.pyplot as plt
 import pandas as pd
 from fpdf import FPDF
 
+# Вспомогательные графики (радар и круговая) удалены по запросу для очистки интерфейса.
+# Горизонтальный бар-чарт для PDF оставлен без изменений.
 
-# --- СТИЛЬНЫЙ ГРАФИК РЕЙТИНГА (ВМЕСТО РАДАРА) ---
-def plot_radar_chart(top_3_data):
-    # Преобразуем данные
-    names = [fluid['Название'] for fluid in top_3_data]
-    # Очищаем проценты от знака % и переводим в число
-    scores = [float(fluid['Рейтинг'].replace('%', '')) for fluid in top_3_data]
-
-    # Делаем красивый горизонтальный бар-чарт
-    fig = go.Figure(go.Bar(
-        x=scores,
-        y=names,
-        orientation='h',
-        marker=dict(
-            color=scores,
-            colorscale='Viridis',  # Красивый градиент
-            line=dict(color='rgba(0,0,0,0)', width=1)
-        ),
-        text=[f"{s}%" for s in scores],
-        textposition='auto'
-    ))
-
-    fig.update_layout(
-        title="Рейтинг растворов (AHP-TOPSIS)",
-        xaxis_title="Оценка соответствия (%)",
-        yaxis=dict(autorange="reversed"),  # Чтобы победитель был сверху
-        margin=dict(l=20, r=20, t=40, b=20),
-        height=250,
-        plot_bgcolor='rgba(0,0,0,0)'
-    )
-    return fig
-
-
-# --- СТИЛЬНАЯ КАРТА ЗАТРАТ (ВМЕСТО КРУГОВОГО) ---
-def plot_cost_pie(recipe_data):
-    labels = [r['Реагент'].split(' (')[0] for r in recipe_data]
-    values = [r.get('Цена', 10) for r in recipe_data]
-
-    # Используем Treemap (современные "плитки" затрат)
-    df = pd.DataFrame({'Реагент': labels, 'Стоимость (руб)': values})
-    df = df[df['Стоимость (руб)'] > 0]  # Убираем нули
-
-    fig = px.treemap(
-        df,
-        path=['Реагент'],
-        values='Стоимость (руб)',
-        color='Стоимость (руб)',
-        color_continuous_scale='Blues',
-        title="Структура бюджета (руб/м³)"
-    )
-
-    fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=300)
-    fig.update_traces(textinfo="label+value+percent entry")
-    return fig
-
-
-# --- PDF ГЕНЕРАТОР (Остается без изменений, он хорош) ---
 def create_summary_pdf(well_name, intervals):
     pdf = FPDF(orientation='P', unit='mm', format='A4')
     pdf.add_page()
@@ -102,7 +46,7 @@ def create_summary_pdf(well_name, intervals):
             pdf.cell(40, 6, txt=r.get('На 1 м³', ''), border=1, align='C')
             pdf.ln()
 
-        # Для PDF оставляем простой горизонтальный бар-чарт по стоимости
+        # Построение графика для PDF
         labels = [r['Реагент'].split(' (')[0] for r in it.get('RecipeTotal', [])]
         values = [r.get('Цена', 100) for r in it.get('RecipeTotal', [])]
 

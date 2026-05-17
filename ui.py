@@ -10,7 +10,7 @@ from db import (authenticate_user, get_history, get_all_users, add_user_to_db,
                 get_fluids_filtered, save_interval_to_db, delete_interval_from_db, get_db_connection)
 from calculations import calculate_physics, calculate_topsis
 from services import load_intervals_from_db
-from reports import plot_radar_chart, plot_cost_pie, create_summary_pdf
+from reports import create_summary_pdf
 
 
 def show_login_page():
@@ -23,9 +23,11 @@ def show_login_page():
             if st.form_submit_button("Войти", use_container_width=True):
                 user = authenticate_user(username, password)
                 if user:
-                    st.session_state.update({'logged_in': True, 'user_id': user[0], 'user_role': user[1]}); st.rerun()
+                    st.session_state.update({'logged_in': True, 'user_id': user[0], 'user_role': user[1]});
+                    st.rerun()
                 else:
                     st.error("Неверный логин или пароль")
+
 
 def show_admin_panel():
     c1, c2 = st.columns([4, 1])
@@ -57,7 +59,8 @@ def show_admin_panel():
                 new_role = st.selectbox("Роль", ["engineer", "admin"])
                 if st.form_submit_button("Создать", type="primary", use_container_width=True):
                     if add_user_to_db(new_user, new_pass, new_role):
-                        st.success("Пользователь добавлен!"); st.rerun()
+                        st.success("Пользователь добавлен!");
+                        st.rerun()
                     else:
                         st.error("Ошибка!")
 
@@ -130,6 +133,7 @@ def show_admin_panel():
                 else:
                     st.warning("Рецептура не задана.")
 
+
 def show_engineer_panel():
     projects_df = get_user_projects(st.session_state['user_id'])
     project_list = projects_df['name'].tolist() if not projects_df.empty else []
@@ -140,21 +144,26 @@ def show_engineer_panel():
             new_proj_name = st.text_input("Новый проект")
             if st.form_submit_button("Создать", use_container_width=True) and new_proj_name.strip():
                 st.session_state['current_project_id'] = create_project(st.session_state['user_id'],
-                                                                        new_proj_name.strip());
+                                                                        new_proj_name.strip())
                 st.rerun()
         st.divider()
         if project_list:
-            selected_proj_name = st.selectbox("Активный проект:", options=project_list,
-                                              index=0 if st.session_state['current_project_id'] is None else (
-                                                  projects_df[projects_df['id'] == st.session_state[
-                                                      'current_project_id']].index[0] if st.session_state[
-                                                                                             'current_project_id'] in
-                                                                                         projects_df[
-                                                                                             'id'].values else 0))
+            # Исправление ошибки с int64 при выборе проекта
+            if st.session_state['current_project_id'] is None or st.session_state['current_project_id'] not in \
+                    projects_df['id'].values:
+                default_index = 0
+            else:
+                raw_index = projects_df[projects_df['id'] == st.session_state['current_project_id']].index[0]
+                default_index = int(raw_index)
+
+            selected_proj_name = st.selectbox("Активный проект:", options=project_list, index=default_index)
             active_proj_id = int(projects_df[projects_df['name'] == selected_proj_name].iloc[0]['id'])
             st.session_state['current_project_id'] = active_proj_id
-            if st.button("Удалить проект", type="secondary", use_container_width=True): delete_project_from_db(
-                active_proj_id); st.session_state['current_project_id'] = None; st.rerun()
+
+            if st.button("Удалить проект", type="secondary", use_container_width=True):
+                delete_project_from_db(active_proj_id)
+                st.session_state['current_project_id'] = None
+                st.rerun()
         st.divider()
         if st.button("Выйти", use_container_width=True): st.session_state.clear(); st.rerun()
 
@@ -163,34 +172,35 @@ def show_engineer_panel():
         return
 
     current_intervals = load_intervals_from_db(st.session_state['current_project_id'])
-    st.session_state['well_name'] = projects_df[projects_df['id'] == st.session_state['current_project_id']].iloc[0]['name']
+    st.session_state['well_name'] = projects_df[projects_df['id'] == st.session_state['current_project_id']].iloc[0][
+        'name']
 
     st.title(f"{st.session_state['well_name']}")
 
     with st.expander("ДОБАВИТЬ НОВЫЙ ИНТЕРВАЛ", expanded=True):
         with st.form("add_interval_form", clear_on_submit=False):
             int_name = st.text_input("Название (напр. Кондуктор)", value="Интервал 1")
-            col1, col2, col3 = st.columns(3)
+
+            # Более свободный интерфейс в 2 колонки
+            col1, col2 = st.columns(2)
             with col1:
-                H = st.number_input("Глубина (H), м", min_value=10.0, value=1000.0, step=50.0); D_mm = st.number_input(
-                    "Долото, мм", min_value=50.0, value=215.9, step=1.0)
+                st.markdown("**Параметры ствола**")
+                H = st.number_input("Глубина (H), м", min_value=10.0, value=1000.0, step=50.0)
+                D_mm = st.number_input("Долото, мм", min_value=50.0, value=215.9, step=1.0)
+                angle = st.number_input("Зенитный угол, °", value=0.0)
+
             with col2:
+                st.markdown("**Пластовые условия**")
                 P_pl = st.number_input("Пластовое давление (P пл), МПа", min_value=1.0, value=12.0, step=0.5)
-                # Добавили поле ввода давления разрыва (по умолчанию чуть больше пластового)
-                P_gr = st.number_input("Давление разрыва (P гр), МПа", min_value=P_pl+1.0, value=P_pl+6.0, step=0.5)
+                P_gr = st.number_input("Давление разрыва (P гр), МПа", min_value=P_pl + 1.0, value=P_pl + 6.0, step=0.5)
                 T_zab = st.number_input("Температура забоя, °C", min_value=10.0, value=40.0, step=5.0)
-            with col3:
-                angle = st.number_input("Зенитный угол", value=0.0)
-                presets_df = get_presets()
 
-                if not presets_df.empty:
-                    # 1. Показываем инженеру список ТОЛЬКО литологий из базы данных
-                    selected_lithology = st.selectbox("Литология / Условия", presets_df['lithology'].tolist())
-
-                    # 2. Программа сама находит скрытое осложнение, привязанное к этой породе в БД
-                    selected_preset_name = presets_df[presets_df['lithology'] == selected_lithology].iloc[0]['name']
-                else:
-                    selected_preset_name = None
+            presets_df = get_presets()
+            if not presets_df.empty:
+                selected_lithology = st.selectbox("Литология / Условия бурения", presets_df['lithology'].tolist())
+                selected_preset_name = presets_df[presets_df['lithology'] == selected_lithology].iloc[0]['name']
+            else:
+                selected_preset_name = None
 
             if st.form_submit_button("Рассчитать и добавить", type="primary",
                                      use_container_width=True) and not presets_df.empty:
@@ -231,26 +241,20 @@ def show_engineer_panel():
                         delete_interval_from_db(it['id'])
                         st.rerun()
 
-                t_table, t_cost, t_radar = st.tabs(["Рецептура (1 м³)", "Структура затрат", "Анализ TOPSIS"])
+                st.markdown("**Рецептура (на 1 м³):**")
+                st.dataframe(pd.DataFrame(it.get('RecipeTotal', [])), use_container_width=True, hide_index=True)
 
-                with t_table:
-                    st.dataframe(pd.DataFrame(it.get('RecipeTotal', [])), use_container_width=True, hide_index=True)
-
-                with t_cost:
-                    # ДОБАВЛЕН УНИКАЛЬНЫЙ KEY
-                    st.plotly_chart(plot_cost_pie(it.get('RecipeTotal', [])), use_container_width=True,
-                                    key=f"pie_chart_{it['id']}")
-
-                with t_radar:
+                if st.button("Показать альтернативы", key=f"alt_btn_{it['id']}"):
                     if it.get('Top_3'):
-                        # ДОБАВЛЕН УНИКАЛЬНЫЙ KEY
-                        st.plotly_chart(plot_radar_chart(it.get('Top_3')), use_container_width=True,
-                                        key=f"radar_chart_{it['id']}")
+                        st.markdown("**Топ-3 подходящих раствора (TOPSIS):**")
+                        alt_df = pd.DataFrame(it.get('Top_3'))
+                        st.dataframe(alt_df[['Название', 'Основа', 'Рейтинг', 'Стоимость']], use_container_width=True,
+                                     hide_index=True)
                     else:
-                        st.write("Недостаточно данных для построения графика.")
+                        st.info("Альтернативных вариантов не найдено.")
                 st.divider()
 
         pdf_bytes = create_summary_pdf(st.session_state['well_name'], current_intervals)
-        st.download_button(label="Скачать Паспорт с графиками (PDF)", data=bytes(pdf_bytes),
+        st.download_button(label="Скачать Паспорт скважины (PDF)", data=bytes(pdf_bytes),
                            file_name=f"Паспорт_{st.session_state['well_name']}.pdf", mime="application/pdf",
                            type="primary")
